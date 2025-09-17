@@ -1,5 +1,5 @@
 # 基础依赖
-
+python==3.11.0  # 建议指定Python版本，避免兼容问题
 streamlit==1.49.1  # 你的Streamlit版本
 numpy==1.26.4  # 数值计算
 pandas==2.2.2  # 数据处理
