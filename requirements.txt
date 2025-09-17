@@ -1,5 +1,5 @@
 # 基础依赖
-python==3.10  # 建议指定Python版本，避免兼容问题
+
 streamlit==1.49.1  # 你的Streamlit版本
 numpy==1.26.4  # 数值计算
 pandas==2.2.2  # 数据处理
@@ -19,3 +19,4 @@ scipy==1.13.1  # 科学计算（VMD可能依赖）
 plotly==5.22.0  # 若用交互式可视化
 statsmodels==0.14.2  # 若用时序分析
 tqdm==4.66.5  # 进度条（可选）
+
