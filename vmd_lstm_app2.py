@@ -1,7 +1,6 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-
 import os
 from datetime import datetime, timedelta
 from sklearn.preprocessing import StandardScaler
@@ -11,6 +10,15 @@ from vmdpy import VMD
 # 页面配置与全局设置
 st.set_page_config(page_title="VMD-LSTM疫情预测系统", layout="wide")
 
+# 初始化会话状态管理所有动态数据
+if 'state' not in st.session_state:
+    st.session_state.state = {
+        'processed_data': None,
+        'model': None,
+        'vmd_transform': None,
+        'predictions': None,
+        'uploaded_file_id': None
+    }
 
 # 模型路径和关键参数
 MODEL_PATH = "singlemodel(week).keras"  # 模型文件路径
@@ -161,22 +169,40 @@ def predict_multiple_weeks(model, vmd_transform, processed_data, start_date, end
     
     return predictions
 
+# 创建一个容器用于显示预测结果，避免重复渲染
+result_container = st.container()
+
 # Streamlit界面
 st.title("VMD-LSTM疫情周预测系统（支持CSV上传）")
 
 # 文件上传部分
 st.subheader("1. 上传数据文件")
-uploaded_file = st.file_uploader("请上传包含'Date'和'cases'列的CSV文件", type=["csv"])
+uploaded_file = st.file_uploader(
+    "请上传包含'Date'和'cases'列的CSV文件", 
+    type=["csv"],
+    key="file_uploader"
+)
+
+# 检测文件是否更换，如果更换则重置相关状态
+if uploaded_file is not None:
+    file_id = hash(uploaded_file.getvalue())
+    if file_id != st.session_state.state['uploaded_file_id']:
+        st.session_state.state['uploaded_file_id'] = file_id
+        st.session_state.state['processed_data'] = None
+        st.session_state.state['model'] = None
+        st.session_state.state['vmd_transform'] = None
+        st.session_state.state['predictions'] = None
 
 if uploaded_file is not None:
-    # 处理上传的数据
-    processed_data = load_and_preprocess_uploaded_data(uploaded_file)
+    # 处理上传的数据（仅在未处理过时执行）
+    if st.session_state.state['processed_data'] is None:
+        st.session_state.state['processed_data'] = load_and_preprocess_uploaded_data(uploaded_file)
     
-    if processed_data is not None:
+    if st.session_state.state['processed_data'] is not None:
         # 显示数据信息
         st.subheader("2. 数据概览")
-        last_monday = processed_data['last_monday']
-        data = processed_data['data']
+        last_monday = st.session_state.state['processed_data']['last_monday']
+        data = st.session_state.state['processed_data']['data']
         st.write(f"数据时间范围：{data.index.min().strftime('%Y-%m-%d')}（周一）至 {last_monday.strftime('%Y-%m-%d')}（周一）")
         st.write(f"总周数：{len(data)}周")
         st.info("数据已按每周一至周日聚合，索引日期为每周一")
@@ -185,11 +211,14 @@ if uploaded_file is not None:
         st.write("数据预览（前5行）：")
         st.dataframe(data.head())
         
-        # 加载模型和VMD
-        model, vmd_transform = initialize_model_and_vmd(processed_data['scaled_cases'])
+        # 加载模型和VMD（仅在未加载过时执行）
+        if st.session_state.state['model'] is None or st.session_state.state['vmd_transform'] is None:
+            st.session_state.state['model'], st.session_state.state['vmd_transform'] = initialize_model_and_vmd(
+                st.session_state.state['processed_data']['scaled_cases']
+            )
         
         # 预测部分
-        if model is not None and vmd_transform is not None:
+        if st.session_state.state['model'] is not None and st.session_state.state['vmd_transform'] is not None:
             st.subheader("3. 未来预测")
             
             # 日期选择器（基于最后一个周一）
@@ -199,7 +228,8 @@ if uploaded_file is not None:
                     "选择起始周（周一）",
                     value=last_monday + timedelta(weeks=1),
                     min_value=last_monday + timedelta(weeks=1),
-                    format="YYYY-MM-DD"
+                    format="YYYY-MM-DD",
+                    key="start_date"
                 )
             
             with col2:
@@ -207,7 +237,8 @@ if uploaded_file is not None:
                     "选择结束周（周一）",
                     value=last_monday + timedelta(weeks=3),
                     min_value=start_date,
-                    format="YYYY-MM-DD"
+                    format="YYYY-MM-DD",
+                    key="end_date"
                 )
             
             # 验证日期是否为周一
@@ -223,30 +254,38 @@ if uploaded_file is not None:
                 week_count = ((end_date - start_date).days // 7) + 1
                 st.info(f"共预测 {week_count} 周数据（从 {start_date} 到 {end_date}）")
                 
-                if st.button("生成预测"):
+                if st.button("生成预测", key="predict_btn"):
                     with st.spinner("正在预测..."):
-                        predictions = predict_multiple_weeks(
-                            model, 
-                            vmd_transform, 
-                            processed_data, 
+                        st.session_state.state['predictions'] = predict_multiple_weeks(
+                            st.session_state.state['model'], 
+                            st.session_state.state['vmd_transform'], 
+                            st.session_state.state['processed_data'], 
                             start_date, 
                             end_date
                         )
-                        
-                        if predictions is not None:
-                            st.success("预测完成！")
-                            
-                            # 显示结果表格
-                            result_data = []
-                            total = 0
-                            for item in predictions:
-                                week_range = f"{item['start_date'].strftime('%Y-%m-%d')} 至 {item['end_date'].strftime('%Y-%m-%d')}"
-                                result_data.append({"周范围": week_range, "预测病例数": item['prediction']})
-                                total += item['prediction']
-                            
-                            st.table(pd.DataFrame(result_data))
-                            st.markdown(f"### 预测总病例数：{total} 例")
-                            
+        
+        # 在独立容器中显示预测结果
+        with result_container:
+            if st.session_state.state['predictions'] is not None:
+                st.success("预测完成！")
+                
+                # 显示结果表格
+                result_data = []
+                total = 0
+                for item in st.session_state.state['predictions']:
+                    week_range = f"{item['start_date'].strftime('%Y-%m-%d')} 至 {item['end_date'].strftime('%Y-%m-%d')}"
+                    result_data.append({"周范围": week_range, "预测病例数": item['prediction']})
+                    total += item['prediction']
+                
+                # 使用dataframe替代table，减少渲染冲突
+                st.dataframe(pd.DataFrame(result_data), use_container_width=True)
+                st.markdown(f"### 预测总病例数：{total} 例")
+                
+                # 添加重置按钮
+                if st.button("重置预测", key="reset_btn"):
+                    st.session_state.state['predictions'] = None
+                    st.experimental_rerun()
+
 # 侧边栏参数
 with st.sidebar:
     st.header("模型参数")
@@ -256,4 +295,3 @@ with st.sidebar:
     st.write(f"数据标准化方式：StandardScaler")
     st.write(f"周起始日：周一")
     st.info("使用说明：\n1. 上传包含'Date'和'cases'列的CSV文件\n2. 系统会自动按周聚合数据\n3. 选择预测的起始和结束周（均为周一）\n4. 点击生成预测按钮查看结果")
-    
