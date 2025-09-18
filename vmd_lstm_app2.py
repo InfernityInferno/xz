@@ -7,159 +7,130 @@ from sklearn.preprocessing import StandardScaler
 from tensorflow.keras.models import load_model
 from vmdpy import VMD
 
-# 页面配置与全局设置
+# -------------------------- 1. 全局配置与状态初始化（关键：提前定义所有状态）
 st.set_page_config(page_title="VMD-LSTM疫情预测系统", layout="wide")
 
-# 初始化会话状态管理所有动态数据
-if 'state' not in st.session_state:
-    st.session_state.state = {
-        'processed_data': None,
-        'model': None,
-        'vmd_transform': None,
-        'predictions': None,
-        'uploaded_file_id': None
+# 用独立会话状态存储所有数据，避免分散导致的渲染冲突
+if 'app_state' not in st.session_state:
+    st.session_state.app_state = {
+        "file_processed": False,       # 标记文件是否已处理
+        "model_loaded": False,         # 标记模型是否已加载
+        "has_predictions": False,      # 标记是否有预测结果
+        "processed_data": None,        # 处理后的数据
+        "model": None,                 # 加载的模型
+        "vmd_transform": None,         # VMD转换函数
+        "predictions": None,           # 预测结果
+        "start_date": None,            # 预测起始日期
+        "end_date": None               # 预测结束日期
     }
 
-# 模型路径和关键参数
-MODEL_PATH = "singlemodel(week).keras"  # 模型文件路径
-best_K = 9  # 最佳VMD分解K值
-window_size = 2  # 滑动窗口大小
+# 模型固定参数（避免动态修改）
+MODEL_PATH = "singlemodel(week).keras"
+best_K = 9
+window_size = 2
 
-# 数据加载与预处理（从上传CSV文件读取）
-def load_and_preprocess_uploaded_data(uploaded_file):
+
+# -------------------------- 2. 核心功能函数（纯逻辑，不涉及Streamlit渲染）
+def load_and_preprocess(uploaded_file):
+    """纯数据处理函数，无Streamlit交互"""
     try:
-        # 读取上传的CSV文件
         df = pd.read_csv(uploaded_file)
+        if 'Date' not in df.columns or 'cases' not in df.columns:
+            return {"success": False, "msg": "CSV需包含'Date'和'cases'列"}
         
-        # 检查必要的列是否存在
-        if 'Date' not in df.columns:
-            st.error("上传的CSV文件必须包含'Date'列")
-            return None
-        if 'cases' not in df.columns:
-            st.error("上传的CSV文件必须包含'cases'列")
-            return None
-        
-        # 处理日期列
         df['date'] = pd.to_datetime(df['Date'])
-        
-        # 按周聚合（周一为起始）
         df = df.set_index('date')
-        data = df.resample('W-MON').agg({
-            'cases': 'sum'  # 只聚合病例数据
-        }).dropna()
+        data = df.resample('W-MON')['cases'].sum().dropna()
         
         if len(data) < window_size + 1:
-            st.error(f"数据量不足，至少需要{window_size + 1}周的数据")
-            return None
+            return {"success": False, "msg": f"需至少{window_size + 1}周数据"}
         
-        # 提取病例数据
+        # 标准化处理
         cases = data['cases'].values.reshape(-1, 1)
-        
-        # 计算训练集边界（用于拟合标准化器）
-        total_len = len(data)
-        train_end = int(0.7 * total_len)
-        
-        # 拟合标准化器
-        case_scaler = StandardScaler()
-        case_scaler.fit(cases[:train_end])
-        
-        # 标准化数据
-        scaled_cases = case_scaler.transform(cases)
+        train_end = int(0.7 * len(data))
+        scaler = StandardScaler()
+        scaler.fit(cases[:train_end])
+        scaled_cases = scaler.transform(cases)
         
         return {
-            'data': data,
-            'scaled_cases': scaled_cases,
-            'case_scaler': case_scaler,
-            'last_monday': data.index[-1].date()
+            "success": True,
+            "data": {
+                "raw_data": data,
+                "scaled_cases": scaled_cases,
+                "scaler": scaler,
+                "last_monday": data.index[-1].date()
+            }
         }
     except Exception as e:
-        st.error(f"数据处理失败：{str(e)}")
-        return None
+        return {"success": False, "msg": f"数据处理失败：{str(e)}"}
 
-# VMD分解函数
-def fit_vmd(train_signal, K):
-    alpha = 5000
-    tau = 0.1
-    DC = 0
-    init = 1
-    tol = 1e-7
-    
-    def transform(signal):
-        imfs, _, _ = VMD(
-            signal.flatten(), 
-            alpha=alpha, 
-            tau=tau, 
-            K=K, 
-            DC=DC, 
-            init=init, 
-            tol=tol
-        )
-        return np.array(imfs).T  # 形状: (n_samples, K)
-    
-    return transform
 
-# 加载模型与初始化VMD
-def initialize_model_and_vmd(scaled_cases):
+def init_model_and_vmd(scaled_cases):
+    """纯模型初始化函数，无Streamlit交互"""
     if not os.path.exists(MODEL_PATH):
-        st.error(f"未找到模型文件：{MODEL_PATH}")
-        return None, None
+        return {"success": False, "msg": f"未找到模型文件：{MODEL_PATH}"}
     
     try:
-        # 加载模型
         model = load_model(MODEL_PATH)
+        train_end = int(0.7 * len(scaled_cases))
         
-        # 用训练集数据初始化VMD
-        total_len = len(scaled_cases)
-        train_end = int(0.7 * total_len)
-        vmd_transform = fit_vmd(scaled_cases[:train_end], K=best_K)
+        # 定义VMD转换（固定参数）
+        def vmd_transform(signal):
+            alpha = 5000
+            tau = 0.1
+            DC = 0
+            init = 1
+            tol = 1e-7
+            imfs, _, _ = VMD(signal.flatten(), alpha, tau, best_K, DC, init, tol)
+            return np.array(imfs).T
         
-        return model, vmd_transform
+        # 用训练集初始化VMD（仅执行一次）
+        vmd_transform(scaled_cases[:train_end])
+        return {
+            "success": True,
+            "model": model,
+            "vmd_transform": vmd_transform
+        }
     except Exception as e:
-        st.error(f"模型加载失败：{str(e)}")
-        return None, None
+        return {"success": False, "msg": f"模型加载失败：{str(e)}"}
 
-# 单周预测函数
-def predict_single_week(model, vmd_transform, current_imfs, case_scaler, window_size, best_K):
-    X_pred = current_imfs.reshape(1, window_size, best_K)
-    pred_scaled = model.predict(X_pred, verbose=0)[0][0]
-    return pred_scaled, case_scaler.inverse_transform([[pred_scaled]])[0][0]
 
-# 多周预测函数
-def predict_multiple_weeks(model, vmd_transform, processed_data, start_date, end_date):
+def generate_predictions(model, vmd_transform, processed_data, start_date, end_date):
+    """纯预测函数，无Streamlit交互"""
     last_monday = processed_data['last_monday']
     scaled_cases = processed_data['scaled_cases']
-    case_scaler = processed_data['case_scaler']
+    scaler = processed_data['scaler']
     
-    # 计算预测周数差
-    start_weeks_diff = (start_date - last_monday).days // 7
-    end_weeks_diff = (end_date - last_monday).days // 7
+    # 计算周数差
+    start_diff = (start_date - last_monday).days // 7
+    end_diff = (end_date - last_monday).days // 7
     
-    if start_weeks_diff <= 0 or end_weeks_diff <= 0 or start_date > end_date:
-        st.warning("请确保起始周在结束周之前，且都晚于最后一个数据点的日期")
-        return None
+    if start_diff <= 0 or end_diff <= 0 or start_date > end_date:
+        return {"success": False, "msg": "起始周需在结束周前，且均晚于最后数据周"}
     
-    # 用最近的窗口数据初始化
+    # 预测逻辑
     temp_cases = scaled_cases[-window_size:].copy()
     current_imfs = vmd_transform(temp_cases)
     
     # 先预测到起始周
-    for _ in range(start_weeks_diff):
-        pred_scaled, _ = predict_single_week(model, vmd_transform, current_imfs, case_scaler, window_size, best_K)
+    for _ in range(start_diff):
+        pred_scaled = model.predict(current_imfs.reshape(1, window_size, best_K), verbose=0)[0][0]
         temp_cases = np.append(temp_cases[1:], pred_scaled).reshape(-1, 1)
         current_imfs = vmd_transform(temp_cases)[-window_size:]
     
-    # 预测起始周到结束周
-    current_date = start_date
-    total_weeks = end_weeks_diff - start_weeks_diff + 1
+    # 预测目标周
     predictions = []
+    current_date = start_date
+    total_weeks = end_diff - start_diff + 1
     
     for _ in range(total_weeks):
-        pred_scaled, pred_actual = predict_single_week(model, vmd_transform, current_imfs, case_scaler, window_size, best_K)
+        pred_scaled = model.predict(current_imfs.reshape(1, window_size, best_K), verbose=0)[0][0]
+        pred_actual = round(scaler.inverse_transform([[pred_scaled]])[0][0])
         week_end = current_date + timedelta(days=6)
         predictions.append({
-            'start_date': current_date,
-            'end_date': week_end,
-            'prediction': round(pred_actual)
+            "start_date": current_date,
+            "end_date": week_end,
+            "prediction": pred_actual
         })
         
         # 更新窗口
@@ -167,131 +138,141 @@ def predict_multiple_weeks(model, vmd_transform, processed_data, start_date, end
         current_imfs = vmd_transform(temp_cases)[-window_size:]
         current_date += timedelta(weeks=1)
     
-    return predictions
+    return {"success": True, "predictions": predictions}
 
-# 创建一个容器用于显示预测结果，避免重复渲染
-result_container = st.container()
 
-# Streamlit界面
-st.title("VMD-LSTM疫情周预测系统（支持CSV上传）")
-
-# 文件上传部分
-st.subheader("1. 上传数据文件")
-uploaded_file = st.file_uploader(
-    "请上传包含'Date'和'cases'列的CSV文件", 
-    type=["csv"],
-    key="file_uploader"
-)
-
-# 检测文件是否更换，如果更换则重置相关状态
-if uploaded_file is not None:
-    file_id = hash(uploaded_file.getvalue())
-    if file_id != st.session_state.state['uploaded_file_id']:
-        st.session_state.state['uploaded_file_id'] = file_id
-        st.session_state.state['processed_data'] = None
-        st.session_state.state['model'] = None
-        st.session_state.state['vmd_transform'] = None
-        st.session_state.state['predictions'] = None
-
-if uploaded_file is not None:
-    # 处理上传的数据（仅在未处理过时执行）
-    if st.session_state.state['processed_data'] is None:
-        st.session_state.state['processed_data'] = load_and_preprocess_uploaded_data(uploaded_file)
+# -------------------------- 3. Streamlit界面（严格分区，减少动态嵌套）
+def main():
+    # 固定标题（无动态变化）
+    st.title("VMD-LSTM疫情周预测系统")
     
-    if st.session_state.state['processed_data'] is not None:
-        # 显示数据信息
+    # -------------------------- 3.1 第一区：文件上传（仅处理一次）
+    st.subheader("1. 上传数据文件")
+    uploaded_file = st.file_uploader("选择CSV文件（含'Date'和'cases'列）", type="csv", key="file_upload")
+    
+    # 仅在文件上传且未处理过时执行
+    if uploaded_file and not st.session_state.app_state["file_processed"]:
+        with st.spinner("处理数据中..."):
+            result = load_and_preprocess(uploaded_file)
+            if result["success"]:
+                st.session_state.app_state["processed_data"] = result["data"]
+                st.session_state.app_state["file_processed"] = True
+                st.success("数据处理完成！")
+            else:
+                st.error(result["msg"])
+    
+    # -------------------------- 3.2 第二区：数据概览（仅在文件处理后显示）
+    if st.session_state.app_state["file_processed"]:
         st.subheader("2. 数据概览")
-        last_monday = st.session_state.state['processed_data']['last_monday']
-        data = st.session_state.state['processed_data']['data']
-        st.write(f"数据时间范围：{data.index.min().strftime('%Y-%m-%d')}（周一）至 {last_monday.strftime('%Y-%m-%d')}（周一）")
+        data = st.session_state.app_state["processed_data"]["raw_data"]
+        last_monday = st.session_state.app_state["processed_data"]["last_monday"]
+        
+        st.write(f"数据范围：{data.index.min().strftime('%Y-%m-%d')}（周一）至 {last_monday.strftime('%Y-%m-%d')}（周一）")
         st.write(f"总周数：{len(data)}周")
-        st.info("数据已按每周一至周日聚合，索引日期为每周一")
+        st.dataframe(data.head(5), use_container_width=True)
         
-        # 显示前5行数据预览
-        st.write("数据预览（前5行）：")
-        st.dataframe(data.head())
+        # -------------------------- 3.3 第三区：模型加载（仅在数据处理后执行一次）
+        if not st.session_state.app_state["model_loaded"]:
+            with st.spinner("加载模型中..."):
+                scaled_cases = st.session_state.app_state["processed_data"]["scaled_cases"]
+                model_result = init_model_and_vmd(scaled_cases)
+                if model_result["success"]:
+                    st.session_state.app_state["model"] = model_result["model"]
+                    st.session_state.app_state["vmd_transform"] = model_result["vmd_transform"]
+                    st.session_state.app_state["model_loaded"] = True
+                    st.success("模型加载完成！")
+                else:
+                    st.error(model_result["msg"])
         
-        # 加载模型和VMD（仅在未加载过时执行）
-        if st.session_state.state['model'] is None or st.session_state.state['vmd_transform'] is None:
-            st.session_state.state['model'], st.session_state.state['vmd_transform'] = initialize_model_and_vmd(
-                st.session_state.state['processed_data']['scaled_cases']
-            )
-        
-        # 预测部分
-        if st.session_state.state['model'] is not None and st.session_state.state['vmd_transform'] is not None:
-            st.subheader("3. 未来预测")
+        # -------------------------- 3.4 第四区：预测配置（仅在模型加载后显示）
+        if st.session_state.app_state["model_loaded"]:
+            st.subheader("3. 预测配置")
+            last_monday = st.session_state.app_state["processed_data"]["last_monday"]
             
-            # 日期选择器（基于最后一个周一）
+            # 日期选择器（固定初始值，避免动态变化）
             col1, col2 = st.columns(2)
             with col1:
                 start_date = st.date_input(
-                    "选择起始周（周一）",
+                    "起始周（周一）",
                     value=last_monday + timedelta(weeks=1),
                     min_value=last_monday + timedelta(weeks=1),
                     format="YYYY-MM-DD",
-                    key="start_date"
+                    key="start_picker"
                 )
-            
             with col2:
                 end_date = st.date_input(
-                    "选择结束周（周一）",
+                    "结束周（周一）",
                     value=last_monday + timedelta(weeks=3),
                     min_value=start_date,
                     format="YYYY-MM-DD",
-                    key="end_date"
+                    key="end_picker"
                 )
             
-            # 验证日期是否为周一
+            # 日期验证（提前判断，避免点击后报错）
             date_valid = True
             if start_date.weekday() != 0:
-                st.warning("起始周请选择周一")
+                st.warning("起始周必须是周一")
                 date_valid = False
             if end_date.weekday() != 0:
-                st.warning("结束周请选择周一")
+                st.warning("结束周必须是周一")
                 date_valid = False
             
-            if date_valid:
-                week_count = ((end_date - start_date).days // 7) + 1
-                st.info(f"共预测 {week_count} 周数据（从 {start_date} 到 {end_date}）")
-                
-                if st.button("生成预测", key="predict_btn"):
-                    with st.spinner("正在预测..."):
-                        st.session_state.state['predictions'] = predict_multiple_weeks(
-                            st.session_state.state['model'], 
-                            st.session_state.state['vmd_transform'], 
-                            st.session_state.state['processed_data'], 
-                            start_date, 
-                            end_date
-                        )
+            # 预测按钮（仅在日期有效时可点击）
+            if date_valid and st.button("生成预测", key="predict_btn"):
+                with st.spinner("预测中..."):
+                    pred_result = generate_predictions(
+                        model=st.session_state.app_state["model"],
+                        vmd_transform=st.session_state.app_state["vmd_transform"],
+                        processed_data=st.session_state.app_state["processed_data"],
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                    if pred_result["success"]:
+                        st.session_state.app_state["predictions"] = pred_result["predictions"]
+                        st.session_state.app_state["has_predictions"] = True
+                        st.session_state.app_state["start_date"] = start_date
+                        st.session_state.app_state["end_date"] = end_date
+                    else:
+                        st.error(pred_result["msg"])
         
-        # 在独立容器中显示预测结果
-        with result_container:
-            if st.session_state.state['predictions'] is not None:
-                st.success("预测完成！")
-                
-                # 显示结果表格
-                result_data = []
-                total = 0
-                for item in st.session_state.state['predictions']:
-                    week_range = f"{item['start_date'].strftime('%Y-%m-%d')} 至 {item['end_date'].strftime('%Y-%m-%d')}"
-                    result_data.append({"周范围": week_range, "预测病例数": item['prediction']})
-                    total += item['prediction']
-                
-                # 使用dataframe替代table，减少渲染冲突
-                st.dataframe(pd.DataFrame(result_data), use_container_width=True)
-                st.markdown(f"### 预测总病例数：{total} 例")
-                
-                # 添加重置按钮
-                if st.button("重置预测", key="reset_btn"):
-                    st.session_state.state['predictions'] = None
-                    st.experimental_rerun()
+        # -------------------------- 3.5 第五区：预测结果（独立容器，仅在有结果时显示）
+        if st.session_state.app_state["has_predictions"]:
+            st.subheader("4. 预测结果")
+            predictions = st.session_state.app_state["predictions"]
+            start_date = st.session_state.app_state["start_date"]
+            end_date = st.session_state.app_state["end_date"]
+            
+            # 结果表格（用DataFrame，避免Table渲染冲突）
+            result_df = pd.DataFrame([
+                {
+                    "周范围": f"{p['start_date'].strftime('%Y-%m-%d')} 至 {p['end_date'].strftime('%Y-%m-%d')}",
+                    "预测病例数": p["prediction"]
+                } for p in predictions
+            ])
+            st.dataframe(result_df, use_container_width=True)
+            
+            # 总病例数
+            total_cases = sum(p["prediction"] for p in predictions)
+            st.markdown(f"### 预测总病例数：{total_cases} 例")
+            
+            # 重置按钮（单独一行，避免嵌套）
+            if st.button("重置预测结果", key="reset_btn"):
+                st.session_state.app_state["has_predictions"] = False
+                st.session_state.app_state["predictions"] = None
+                st.experimental_rerun()  # 强制刷新，重置DOM状态
 
-# 侧边栏参数
+
+# -------------------------- 4. 侧边栏（纯静态信息，无动态交互）
 with st.sidebar:
     st.header("模型参数")
-    st.write(f"最佳VMD分解K值：{best_K}")
+    st.write(f"VMD分解K值：{best_K}")
     st.write(f"滑动窗口大小：{window_size}")
     st.write(f"LSTM单元数：32")
-    st.write(f"数据标准化方式：StandardScaler")
+    st.write(f"标准化方式：StandardScaler")
     st.write(f"周起始日：周一")
-    st.info("使用说明：\n1. 上传包含'Date'和'cases'列的CSV文件\n2. 系统会自动按周聚合数据\n3. 选择预测的起始和结束周（均为周一）\n4. 点击生成预测按钮查看结果")
+    st.info("使用步骤：\n1. 上传CSV文件\n2. 等待数据和模型加载\n3. 选择预测周（均为周一）\n4. 点击生成预测")
+
+
+# 启动应用
+if __name__ == "__main__":
+    main()
