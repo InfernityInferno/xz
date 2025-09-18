@@ -7,7 +7,7 @@ matplotlib==3.9.2  # 可视化（之前报错的包）
 seaborn==0.13.2  # 可视化辅助
 
 # LSTM相关依赖
-tensorflow-intel==2.13.0  # 深度学习框架（若用TensorFlow）
+tensorflow-intel==2.12.0  # 深度学习框架（若用TensorFlow）
 torch==2.4.1  # 若用PyTorch，保留；否则删除
 scikit-learn==1.5.1  # 数据预处理、评估
 
@@ -19,6 +19,7 @@ scipy==1.13.1  # 科学计算（VMD可能依赖）
 plotly==5.22.0  # 若用交互式可视化
 statsmodels==0.14.2  # 若用时序分析
 tqdm==4.66.5  # 进度条（可选）
+
 
 
 
