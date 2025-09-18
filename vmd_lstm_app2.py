@@ -247,19 +247,6 @@ if uploaded_file is not None:
                             st.table(pd.DataFrame(result_data))
                             st.markdown(f"### 预测总病例数：{total} 例")
                             
-                            # 可视化
-                            fig, ax = plt.subplots(figsize=(12, 6))
-                            ax.bar(
-                                [p['start_date'].strftime('%Y-%m-%d') for p in predictions],
-                                [p['prediction'] for p in predictions],
-                                color='skyblue'
-                            )
-                            ax.set_title('预测周病例数分布')
-                            ax.set_xlabel('周起始日期（周一）')
-                            ax.set_ylabel('预测病例数')
-                            plt.xticks(rotation=45)
-                            st.pyplot(fig)
-
 # 侧边栏参数
 with st.sidebar:
     st.header("模型参数")
