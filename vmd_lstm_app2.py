@@ -1,7 +1,7 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+
 import os
 from datetime import datetime, timedelta
 from sklearn.preprocessing import StandardScaler
@@ -10,7 +10,7 @@ from vmdpy import VMD
 
 # 页面配置与全局设置
 st.set_page_config(page_title="VMD-LSTM疫情预测系统", layout="wide")
-plt.rcParams["font.family"] = ["SimHei", "WenQuanYi Micro Hei", "Heiti TC"]
+
 
 # 模型路径和关键参数
 MODEL_PATH = "singlemodel(week).keras"  # 模型文件路径
