@@ -31,7 +31,7 @@ window_size = 2
 
 # 核心功能函数
 def load_and_preprocess(uploaded_file):
-    """读取CSV文件并预处理"""
+    """读取CSV文件并预处理（修正时间范围和周聚合）"""
     try:
         df = pd.read_csv(uploaded_file)
         
@@ -40,13 +40,29 @@ def load_and_preprocess(uploaded_file):
         if missing_cols:
             return {"success": False, "msg": f"CSV需包含以下列：{', '.join(missing_cols)}"}
         
+        # 1. 转换日期并过滤核心时间范围（2005.1.1-2023.12.31）
         df['date'] = pd.to_datetime(df['Date'])
         df = df.set_index('date')
+        # 只保留2005.1.1及之后、2023.12.31及之前的数据
+        df = df[(df.index >= pd.Timestamp('2005-01-01')) & (df.index <= pd.Timestamp('2023-12-31'))]
+        if len(df) == 0:
+            return {"success": False, "msg": "CSV中无2005.1.1-2023.12.31的有效数据"}
+        
+        # 2. 按“周一至周日”聚合周数据（W-MON：周起始为周一）
         data = df.resample('W-MON').agg({'cases': 'sum'}).dropna()
         
+        # 3. 再次过滤：确保聚合后的周起始在2005.1.1之后、周结束在2023.12.31之前
+        # 周起始（index）≥2005.1.1，且周结束（index+6天）≤2023.12.31
+        data = data[
+            (data.index >= pd.Timestamp('2005-01-01')) & 
+            ((data.index + timedelta(days=6)) <= pd.Timestamp('2023-12-31'))
+        ]
+        
+        # 4. 校验数据量（保持原逻辑）
         if len(data) < window_size + 1:
             return {"success": False, "msg": f"需至少{window_size + 1}周数据（当前{len(data)}周）"}
         
+        # 后续标准化逻辑不变
         cases = data['cases'].values.reshape(-1, 1)
         train_end = int(0.7 * len(data))
         scaler = StandardScaler()
@@ -59,7 +75,7 @@ def load_and_preprocess(uploaded_file):
                 "raw_data": data,
                 "scaled_cases": scaled_cases,
                 "scaler": scaler,
-                "last_monday": data.index[-1].date()
+                "last_monday": data.index[-1].date()  # 最后一个周一（确保在2023年）
             }
         }
     except Exception as e:
@@ -170,10 +186,13 @@ def main():
         data = st.session_state.app_state["processed_data"]["raw_data"]
         last_monday = st.session_state.app_state["processed_data"]["last_monday"]
         
-        st.write(f"📅 数据时间范围：{data.index.min().strftime('%Y-%m-%d')}（周一）至 {last_monday.strftime('%Y-%m-%d')}（周一）")
-        st.write(f"📊 总周数：{len(data)}周（已按“周一至周日”聚合）")
+        # 新增：计算最后一周的周日（周结束日）
+        last_sunday = last_monday + timedelta(days=6)
+        # 调整文案：显示“周一~周日”的完整周范围
+        st.write(f"📅 数据时间范围：{data.index.min().strftime('%Y-%m-%d')}（周一）~ {last_sunday.strftime('%Y-%m-%d')}（周日）")
+        st.write(f"📊 总周数：{len(data)}周（按“周一至周日”聚合，且限定在2005.1.1-2023.12.31内的完整周）")
         
-        # 修复：用单独的caption函数替代参数
+        # 数据预览（保持不变）
         st.caption("数据预览（前5行）")
         st.dataframe(data.head(5), use_container_width=True)
         
